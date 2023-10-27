@@ -1,0 +1,150 @@
+variables:
+  DOCKER_REGISTRY: xxxxxxxxxxx.dkr.ecr.us-west-1.amazonaws.com
+  AWS_DEFAULT_REGION: us-west-1
+  APP_NAME: example-app-name
+.kubectl-config: &kubectl-config
+  - export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+  - export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+  - export AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID_EKS}
+  - export AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY_EKS}
+  - export AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}
+  - aws eks update-kubeconfig --name="change-me" --region=${AWS_DEFAULT_REGION}
+  - aws ecr get-login-password | docker login --username AWS --password-stdin $DOCKER_REGISTRY
+image: armughanmb/gitlab-k8-essentials
+services:
+    - docker:dind
+stages:
+  - build_docker_image
+  - update_helm_chart
+  - deploy_helm_to_kubernetes
+
+Docker Build Dev:
+  stage: build_docker_image
+  before_script:
+    - *kubectl-config
+  script:
+    - docker build -t $DOCKER_REGISTRY/$APP_NAME:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA .
+    - docker push $DOCKER_REGISTRY/$APP_NAME:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
+  only:
+    - dev
+
+Build Docker Stag:
+  stage: build_docker_image
+  before_script:
+    - *kubectl-config
+  script:
+    - sed -i "s/build/build:stag/g" Dockerfile
+    - sed -i "s/.env.dev/.env.staging/g" Dockerfile
+    - docker build -t $DOCKER_REGISTRY/$APP_NAME:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA .
+    - docker push $DOCKER_REGISTRY/$APP_NAME:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
+  only:
+    - staging
+
+Build Docker Prod:
+  stage: build_docker_image
+  before_script:
+    - *kubectl-config
+  script:
+    - sed -i "s/build/build:prod/g" Dockerfile
+    - sed -i "s/.env.dev/.env.prod/g" Dockerfile
+    - docker build -t $DOCKER_REGISTRY/$APP_NAME:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA .
+    - docker push $DOCKER_REGISTRY/$APP_NAME:$CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA
+  only:
+    - production
+
+Update HELM chart:
+  stage: update_helm_chart
+  before_script:
+    - *kubectl-config
+    - git config --global user.email "armughanmb@outlook.com"
+    - git config --global user.name "armghan"
+  script:
+    - git clone https://${GIT_USER}:${GIT_TOKEN}@gitlab.com/example-git-group-name/k8s-helm-charts.git
+    - cd k8s-helm-charts
+    - sed -i "s|tag:.*|tag:\ $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA|g" ./helm-repo-dir-name/prod-values.yaml
+    - git add .
+    - git commit -m "docker image tag updated to $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA"
+    - git push origin main
+  only:
+    - production
+Update HELM chart Staging:
+  stage: update_helm_chart
+  before_script:
+    - *kubectl-config
+    - git config --global user.email "armughanmb@outlook.com"
+    - git config --global user.name "armghan"
+  script:
+    - git clone https://${GIT_USER}:${GIT_TOKEN}@gitlab.com/example-git-group-name/k8s-helm-charts.git
+    - cd k8s-helm-charts
+    - sed -i "s|tag:.*|tag:\ $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA|g" ./helm-repo-dir-name/stag-values.yaml
+    - git add .
+    - git commit -m "docker image tag updated to $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA"
+    - git push origin main
+  only:
+    - staging
+Update HELM chart Dev:
+  stage: update_helm_chart
+  before_script:
+    - *kubectl-config
+    - git config --global user.email "armughanmb@outlook.com"
+    - git config --global user.name "armughn"
+  script:
+    - git clone https://${GIT_USER}:${GIT_TOKEN}@gitlab.com/example-git-group-name/k8s-helm-charts.git
+    - cd k8s-helm-charts
+    - sed -i "s|tag:.*|tag:\ $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA|g" ./helm-repo-dir-name/dev-values.yaml
+    - git add .
+    - git commit -m "docker image tag updated to $CI_COMMIT_REF_NAME-$CI_COMMIT_SHORT_SHA"
+    - git push origin main
+  only:
+    - dev
+Deploy services on EKS:
+  stage: deploy_helm_to_kubernetes
+  before_script:
+    - *kubectl-config
+  script:
+    - git clone https://${GIT_USER}:${GIT_TOKEN}@gitlab.com/example-git-group-name/k8s-helm-charts.git
+    - cd k8s-helm-charts
+    - export DEPLOY=$(helm  lint helm-repo-dir-name/ -f helm-repo-dir-name/prod-values.yaml | grep Error | wc -l) && pwd && ls
+    - echo "deploy value is ${DEPLOY}"
+    - >
+        if [ "${DEPLOY}" -eq 0 ];
+        then helm upgrade --install example-app-name helm-repo-dir-name/ -f helm-repo-dir-name/prod-values.yaml --create-namespace --namespace production --set image.tag=production-$CI_COMMIT_SHORT_SHA;
+        else echo "deployment failed" && exit 1;
+        fi;
+    - kubectl rollout status deployment example-app-name --namespace production
+  only:
+    - production
+Deploy services on EKS Staging:
+  stage: deploy_helm_to_kubernetes
+  before_script:
+    - *kubectl-config
+  script:
+    - git clone https://${GIT_USER}:${GIT_TOKEN}@gitlab.com/example-git-group-name/k8s-helm-charts.git
+    - cd k8s-helm-charts
+    - export DEPLOY=$(helm  lint helm-repo-dir-name/ -f helm-repo-dir-name/stag-values.yaml | grep Error | wc -l) && pwd && ls
+    - echo "deploy value is ${DEPLOY}"
+    - >
+        if [ "${DEPLOY}" -eq 0 ];
+        then helm upgrade --install example-app-name helm-repo-dir-name/ -f helm-repo-dir-name/stag-values.yaml --create-namespace --namespace staging --set image.tag=staging-$CI_COMMIT_SHORT_SHA;
+        else echo "deployment failed" && exit 1;
+        fi;
+    - kubectl rollout status deployment example-app-name --namespace staging;
+  only:
+    - staging
+Deploy services on EKS Dev :
+  stage: deploy_helm_to_kubernetes
+  before_script:
+    - *kubectl-config
+  script:
+    - git clone https://${GIT_USER}:${GIT_TOKEN}@gitlab.com/example-git-group-name/k8s-helm-charts.git
+    - cd k8s-helm-charts
+    - export DEPLOY=$(helm  lint helm-repo-dir-name/ -f helm-repo-dir-name/dev-values.yaml | grep Error | wc -l) && pwd && ls
+    - echo "deploy value is ${DEPLOY}"
+    - >
+        if [ "${DEPLOY}" -eq 0 ];
+        then helm upgrade --install example-app-name helm-repo-dir-name/ -f helm-repo-dir-name/dev-values.yaml --create-namespace --namespace development --set image.tag=dev-$CI_COMMIT_SHORT_SHA;
+        else echo "deployment failed" && exit 1;
+        fi;
+    - kubectl rollout status deployment example-app-name --namespace development;
+  only:
+    - dev
